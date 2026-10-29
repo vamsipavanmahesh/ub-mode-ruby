@@ -45,6 +45,8 @@ Alternatives considered for duplication: [flay](https://github.com/seattlerb/fla
    - SimpleCov 1.3 or later with branch coverage.
    - `cmake`, or a system libgit2 (`bundle config build.rugged --use-system-libraries`), because undercover builds `rugged`.
    - RSpec for the mutation gate. On Minitest apps the mutation gate reports "not run".
+   - On macOS with the `pg` gem, saboteur needs `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES PGGSSENCMODE=disable`, or its forked test processes crash.
+   - Every file must parse. exhale stops (exit 2) on any file it cannot parse, including untouched ERB views.
 
 3. Run `/ub-mode-ruby` in your agent.
 

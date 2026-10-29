@@ -128,7 +128,7 @@ end
 
 undercover builds `rugged`, which needs `cmake`, or a system libgit2 via `bundle config build.rugged --use-system-libraries`.
 
-Top of `spec/spec_helper.rb`, composed with any formatter the app already uses:
+Top of `spec/spec_helper.rb`:
 
 ```ruby
 require "simplecov"
@@ -140,6 +140,11 @@ SimpleCov.start do
 end
 ```
 
+* If the app already sets formatters, add `SimpleCov::Formatter::Undercover` to its `MultiFormatter` list. Assigning `SimpleCov.formatter` as above would drop the app's own reports.
+* `coverage :branch, ignore: :implicit_else` needs simplecov 1.3. On an older simplecov, upgrade first; undercover 0.9 needs simplecov 1.0 or later anyway.
+
+Fix every file the parsers cannot read before the first gate run. exhale 0.2.0 stops with exit 2 on a parse error in any file, even an ERB view nobody touched, and passing paths does not stop it parsing the rest. Report such files to the owner once, at setup.
+
 `.rubocop.yml`, set explicitly because the default is 7 and the cop may be off by default in a future RuboCop:
 
 ```yaml
@@ -148,7 +153,13 @@ Metrics/CyclomaticComplexity:
   Max: 9
 ```
 
-Run `bundle exec saboteur doctor --suite` once and fix what it reports.
+Environment for saboteur:
+
+* Rails: set `RAILS_ENV=test` explicitly.
+* macOS with the `pg` gem: forked children crash (SEGV) unless you export `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES PGGSSENCMODE=disable` first.
+* saboteur turns SimpleCov off for its own run. Coverage for gate 2 comes from the plain spec run.
+
+On a small or medium suite, run `bundle exec saboteur doctor --suite` once and fix what it reports. On a large suite it runs the whole suite twice and may not finish; use `doctor` without `--suite`.
 
 ### Base and changed files
 
@@ -165,14 +176,16 @@ Run `bundle exec saboteur doctor --suite` once and fix what it reports.
 ### 1. Specs
 
 * `DISABLE_SPRING=1 bundle exec rspec` is green and writes `coverage/coverage.json`.
+* If the suite is not green on `BASE` (local config, flaky specs), run the same spec set on `BASE` first and record the failures. You own only failures that are new at `HEAD`. Report the baseline failures; do not fix them silently as part of your change.
 
 ### 2. CRAP, as complexity plus coverage
 
 CRAP = CC² × (1 − coverage)³ + CC. At full coverage it equals CC, so CRAP under 10 means CC 9 at most and the method fully covered. No proven Ruby gem computes CRAP per method, so the gate is two tools:
 
-* Complexity: `... | xargs bundle exec rubocop --only Metrics/CyclomaticComplexity`. A `.rubocop_todo.yml` entry or `Exclude` that skips a changed file does not count as passing.
+* Complexity: `... | grep -Ev '^(spec|test)/' | xargs bundle exec rubocop --only Metrics/CyclomaticComplexity`. Specs are not production code. A `.rubocop_todo.yml` entry or `Exclude` that skips a changed file does not count as passing.
 * Coverage: `bundle exec undercover --compare $BASE`. It exits 1 and lists the uncovered methods and branches.
 * undercover judges only the lines you changed. When you change a method, cover the whole method, not just your lines: check its lines and branches in `coverage/coverage.json`.
+* undercover judges the node that encloses your change. A one-line change in a class or module body (`delegate`, `include`, a constant) puts the whole class or module on trial. Prefer a change that does not touch a large shared body.
 * Do not add `:nocov:` or `# simplecov:disable` in your change.
 * RuboCop scores only `def` methods. Move any non-trivial body of a `scope`, `validate` or callback block into a method so the gate can see it.
 * Reduce a method by splitting it, by testing it, or both. Decide whether a `case` statement really needs reducing; do not split one or add an `else` only to quiet a warning.
@@ -181,6 +194,7 @@ CRAP = CC² × (1 − coverage)³ + CC. At full coverage it equals CC, so CRAP u
 ### 3. Duplication: exhale
 
 * `bundle exec exhale dry --base $BASE`. Exit 0 clean, 1 duplication to resolve, 2 could not run.
+* On exit 2 from a file you did not change, record the gate as not run. Still read the partial output and list any Introduced or Shifted findings in your report.
 * On an app that does not sweep clean yet, add `--introduced-only`.
 * Never pass `--threshold`, `--min-lines` or `--min-nodes`: any of them turns the gate off.
 * Fold each new copy into the existing original the report names.
@@ -189,11 +203,14 @@ CRAP = CC² × (1 − coverage)³ + CC. At full coverage it equals CC, so CRAP u
 
 ### 4. Mutation: saboteur
 
-* `bundle exec saboteur pr $BASE --agent`. Read the JSON on stdout.
+* Small or medium suite: `bundle exec saboteur pr $BASE --agent`. `pr` checks the whole suite first, inside a ten-minute budget.
+* Large suite: `bundle exec saboteur run --since $BASE --agent --test <spec> [--test <spec>] <changed files>`. This checks only the given specs and mutates only the changed subjects. Name every spec that covers the changed files.
+* Read the JSON on stdout.
 * Exit 0: complete and clean. 1: survivors. 5: the unchanged suite is red; fix the specs first.
 * For each survivor in `findings.shown`, add the smallest spec that checks the behavior the mutant changed. Replay it with the command in `next.replay` and confirm it is killed. Then run the gate again.
 * On exit 4 (the ten-minute budget ran out, Rails boot included), narrow the run: `bundle exec saboteur run path/to/file.rb --agent --test spec/path/to/file_spec.rb`, repeating `--test` for each spec.
 * Never change production behavior only to kill a mutant.
+* A survivor that only changes a log call's message or payload, in a codebase whose rules forbid asserting on logs, cannot be killed honestly. List it as an owner decision. The gate then stays at exit 1 until the owner accepts it or excludes those operators in the saboteur config.
 * Never add a survivor to the ignore list or a `# saboteur:disable-line` comment yourself. Ask the owner.
 * saboteur drives RSpec. On a Minitest app, report this gate as not run.
 
